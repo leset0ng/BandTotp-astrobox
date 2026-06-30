@@ -1,20 +1,16 @@
+use astrobox_ng_wit::exports::astrobox::psys_plugin::event_v3::{self, EventType};
+use astrobox_ng_wit::exports::astrobox::psys_plugin::lifecycle;
 use astrobox_ng_wit::FutureReader;
 
-use astrobox_ng_wit::exports::astrobox::psys_plugin::{
-    event::{self, EventType},
-    lifecycle,
-};
-
 pub mod logger;
+pub mod sync;
 pub mod ui;
-pub mod resources;
 
-struct MyPlugin;
+struct BandTotpPlugin;
 
-impl event::Guest for MyPlugin {
-    #[allow(async_fn_in_trait)]
+impl event_v3::Guest for BandTotpPlugin {
     fn on_event(event_type: EventType, event_payload: String) -> FutureReader<String> {
-        let (writer, reader) = astrobox_ng_wit::wit_future::new::<String>(|| "".to_string());
+        let (writer, reader) = astrobox_ng_wit::wit_future::new::<String>(|| String::new());
 
         match event_type {
             EventType::PluginMessage => {}
@@ -26,34 +22,35 @@ impl event::Guest for MyPlugin {
             EventType::Timer => {}
         };
 
-        tracing::info!("event_payload: {}", event_payload);
+        tracing::info!("event type={:?}, payload={}", event_type, event_payload);
 
         astrobox_ng_wit::spawn(async move {
-            let _ = writer.write("".to_string()).await;
+            let _ = writer.write(String::new()).await;
         });
 
         reader
     }
 
-    fn on_ui_event(
+    fn on_ui_event_v3(
         event_id: String,
-        event: event::Event,
-        _event_payload: String,
-    ) -> astrobox_ng_wit::FutureReader<String> {
-        let (writer, reader) = astrobox_ng_wit::wit_future::new::<String>(|| "".to_string());
-
-        ui::ui_event_processor(event, &event_id);
+        event: event_v3::Event,
+        event_payload: String,
+    ) -> FutureReader<String> {
+        let (writer, reader) = astrobox_ng_wit::wit_future::new::<String>(|| String::new());
 
         astrobox_ng_wit::spawn(async move {
+            tracing::info!("event_id={}, event={:?}, event_payload={}", event_id, event, event_payload);
+            ui::handle_ui_event(event, &event_id, &event_payload).await;
             let _ = writer.write("".to_string()).await;
         });
 
         reader
     }
 
-    fn on_ui_render(element_id: String) -> astrobox_ng_wit::FutureReader<()> {
+    fn on_ui_render(element_id: String) -> FutureReader<()> {
         let (writer, reader) = astrobox_ng_wit::wit_future::new::<()>(|| ());
 
+        ui::set_root_id(element_id.clone());
         ui::render_main_ui(&element_id);
 
         astrobox_ng_wit::spawn(async move {
@@ -63,7 +60,7 @@ impl event::Guest for MyPlugin {
         reader
     }
 
-    fn on_card_render(_card_id: String) -> astrobox_ng_wit::FutureReader<()> {
+    fn on_card_render(_card_id: String) -> FutureReader<()> {
         let (writer, reader) = astrobox_ng_wit::wit_future::new::<()>(|| ());
 
         astrobox_ng_wit::spawn(async move {
@@ -74,12 +71,11 @@ impl event::Guest for MyPlugin {
     }
 }
 
-impl lifecycle::Guest for MyPlugin {
-    #[allow(async_fn_in_trait)]
-    fn on_load() -> () {
+impl lifecycle::Guest for BandTotpPlugin {
+    fn on_load() {
         logger::init();
-        tracing::info!("Hello AstroBox V2 Plugin!");
+        tracing::info!("BandTOTP sync plugin loaded");
     }
 }
 
-astrobox_ng_wit::export!(MyPlugin);
+astrobox_ng_wit::export!(BandTotpPlugin);
