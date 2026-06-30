@@ -6,13 +6,12 @@ pub const EVENT_PICK_FILE: &str = "bandtotp_pick_file";
 pub const EVENT_LAUNCH_APP: &str = "bandtotp_launch_app";
 
 pub const ID_URI_INPUT: &str = "bandtotp_uri_input";
-pub const ID_PKG_INPUT: &str = "bandtotp_pkg_input";
 pub const ID_STATUS_TEXT: &str = "bandtotp_status";
+const BANDTOTP_PACKAGE_NAME: &str = "com.lst.bandtotp";
 
 struct UiState {
     root_element_id: Option<String>,
     last_status: String,
-    package_name: String,
     uri_text: String,
 }
 
@@ -23,7 +22,6 @@ fn ui_state() -> &'static Mutex<UiState> {
         Mutex::new(UiState {
             root_element_id: None,
             last_status: "准备就绪".to_string(),
-            package_name: "com.lst.bandtotp".to_string(),
             uri_text: String::new(),
         })
     })
@@ -55,8 +53,6 @@ pub async fn handle_ui_event(evtype: ui_v3::Event, event_id: &str, payload: &str
             if let Some(value) = parse_input_value(payload, event_id) {
                 if event_id == ID_URI_INPUT {
                     update_uri_text(&value);
-                } else if event_id == ID_PKG_INPUT {
-                    update_package_name(&value);
                 }
             }
         }
@@ -91,19 +87,12 @@ fn update_uri_text(text: &str) {
     state.uri_text = text.to_string();
 }
 
-fn update_package_name(name: &str) {
-    let mut state = ui_state()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    state.package_name = name.to_string();
-}
-
 async fn handle_sync() {
-    let (text, pkg) = {
+    let text = {
         let state = ui_state()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        (state.uri_text.clone(), state.package_name.clone())
+        state.uri_text.clone()
     };
 
     update_status("正在同步到手环...");
@@ -117,7 +106,7 @@ async fn handle_sync() {
     let payload = crate::sync::SyncPayload { list: entries };
     let json = payload.to_json();
 
-    match crate::sync::send_payload(&json, &pkg).await {
+    match crate::sync::send_payload(&json, BANDTOTP_PACKAGE_NAME).await {
         Ok(msg) => update_status(&format!("同步成功：{}", msg)),
         Err(e) => update_status(&format!("同步失败：{}", e)),
     }
@@ -143,16 +132,9 @@ async fn handle_pick_file() {
 }
 
 async fn handle_launch_app() {
-    let pkg = {
-        let state = ui_state()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.package_name.clone()
-    };
-
     update_status("正在打开手环应用...");
 
-    match crate::sync::launch_band_totp(&pkg).await {
+    match crate::sync::launch_band_totp(BANDTOTP_PACKAGE_NAME).await {
         Ok(msg) => update_status(&msg),
         Err(e) => update_status(&format!("打开失败：{}", e)),
     }
@@ -163,13 +145,12 @@ fn build_ui(state: &UiState) -> ui_v3::Element {
         .size(24)
         .margin_bottom(8);
 
-    let pkg_input = ui_v3::Element::new(ui_v3::ElementType::Input, Some(&state.package_name))
-        .prop("id", ID_PKG_INPUT)
-        .width_full()
-        .margin_bottom(8)
-        .on(ui_v3::Event::Input, ID_PKG_INPUT)
-        .on(ui_v3::Event::Change, ID_PKG_INPUT)
-        .on(ui_v3::Event::Blur, ID_PKG_INPUT);
+    let package_hint = ui_v3::Element::new(
+        ui_v3::ElementType::P,
+        Some(&format!("固定同步到手环应用：{}", BANDTOTP_PACKAGE_NAME)),
+    )
+    .size(14)
+    .margin_bottom(8);
 
     let uri_input = ui_v3::Element::new(ui_v3::ElementType::Textarea, Some(&state.uri_text))
         .prop("id", ID_URI_INPUT)
@@ -218,7 +199,7 @@ fn build_ui(state: &UiState) -> ui_v3::Element {
         .width_full()
         .padding(16)
         .child(title)
-        .child(pkg_input)
+        .child(package_hint)
         .child(uri_input)
         .child(btn_row)
         .child(status_card)

@@ -26,30 +26,41 @@ impl SyncPayload {
 
 /// Parse a single `otpauth://totp/...` URI into a `TotpInfo`.
 pub fn parse_totp_uri(totp_uri: &str) -> Option<TotpInfo> {
-    let trimmed = totp_uri.trim();
+    let trimmed = normalize_uri_candidate(totp_uri);
     if trimmed.is_empty() {
         return None;
     }
 
-    let uri = url::Url::parse(trimmed).ok()?;
+    let uri = url::Url::parse(&trimmed).ok()?;
 
     if uri.scheme() != "otpauth" || uri.host_str() != Some("totp") {
         return None;
     }
 
-    let path = uri.path();
-    let stripped = path.trim_start_matches('/');
-    let split_path: Vec<&str> = stripped.splitn(2, ':').collect();
-    if split_path.len() != 2 {
+    let label = percent_decode(uri.path().trim_start_matches('/'));
+    if label.trim().is_empty() {
         return None;
     }
 
-    let issuer_from_path = split_path[0];
-    let account = split_path[1];
+    let (issuer_from_path, account) = match label.split_once(':') {
+        Some((issuer, account)) if !account.trim().is_empty() => {
+            (issuer.trim().to_string(), account.trim().to_string())
+        }
+        _ => (String::new(), label.trim().to_string()),
+    };
 
     let secret = get_query_param(&uri, "secret")?;
     let issuer_from_query = get_query_param(&uri, "issuer");
-    let name = issuer_from_query.unwrap_or_else(|| issuer_from_path.to_string());
+    let name = issuer_from_query
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            if issuer_from_path.is_empty() {
+                None
+            } else {
+                Some(issuer_from_path)
+            }
+        })
+        .unwrap_or_else(|| account.clone());
     let algorithm = get_query_param(&uri, "algorithm").unwrap_or_else(|| "SHA1".to_string());
     let digits = get_query_param(&uri, "digits")
         .and_then(|v| v.parse().ok())
@@ -60,7 +71,7 @@ pub fn parse_totp_uri(totp_uri: &str) -> Option<TotpInfo> {
 
     Some(TotpInfo {
         name,
-        usr: account.to_string(),
+        usr: account,
         key: secret,
         algorithm,
         digits,
@@ -74,9 +85,84 @@ fn get_query_param(uri: &url::Url, key: &str) -> Option<String> {
         .map(|(_, v)| v.into_owned())
 }
 
-/// Parse a multi-line text block into a list of valid TOTP entries.
+/// Parse a text block into a list of valid TOTP entries.
 pub fn parse_totp_text(text: &str) -> Vec<TotpInfo> {
-    text.lines().filter_map(parse_totp_uri).collect()
+    extract_totp_uri_candidates(text)
+        .into_iter()
+        .filter_map(|candidate| parse_totp_uri(&candidate))
+        .collect()
+}
+
+fn extract_totp_uri_candidates(text: &str) -> Vec<String> {
+    let normalized = text.replace(r"\/", "/").replace("&amp;", "&");
+    let mut candidates = Vec::new();
+
+    for line in normalized.lines() {
+        let line = line.trim();
+        if line.starts_with("otpauth://totp/") {
+            candidates.push(line.to_string());
+        }
+    }
+
+    let mut rest = normalized.as_str();
+    while let Some(start) = rest.find("otpauth://totp/") {
+        let candidate_start = &rest[start..];
+        let end = candidate_start
+            .char_indices()
+            .find_map(|(idx, ch)| is_uri_delimiter(ch).then_some(idx))
+            .unwrap_or(candidate_start.len());
+        candidates.push(candidate_start[..end].to_string());
+        rest = &candidate_start[end..];
+    }
+
+    let mut unique = Vec::new();
+    for candidate in candidates {
+        let candidate = normalize_uri_candidate(&candidate);
+        if !candidate.is_empty() && !unique.contains(&candidate) {
+            unique.push(candidate);
+        }
+    }
+    unique
+}
+
+fn is_uri_delimiter(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | '<' | '>' | ',' | ')' | ']' | '}')
+}
+
+fn normalize_uri_candidate(candidate: &str) -> String {
+    candidate
+        .trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '<' | '>' | ',' | ')' | ']' | '}'))
+        .to_string()
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
+
+    while idx < bytes.len() {
+        if bytes[idx] == b'%' && idx + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_value(bytes[idx + 1]), hex_value(bytes[idx + 2])) {
+                output.push((hi << 4) | lo);
+                idx += 3;
+                continue;
+            }
+        }
+        output.push(bytes[idx]);
+        idx += 1;
+    }
+
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Pick a plain-text file and return its contents as a string.
@@ -129,4 +215,50 @@ pub async fn send_payload(payload: &str, app_pkg: &str) -> Result<String, String
         .map_err(|()| "device rejected message".to_string())?;
 
     Ok(format!("sent {} bytes to {}", payload.len(), dev.name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_totp_uri_without_issuer_prefix() {
+        let entry = parse_totp_uri(
+            "otpauth://totp/alice%40example.com?secret=ABC123&issuer=Example",
+        )
+        .expect("URI without issuer prefix should parse");
+
+        assert_eq!(entry.name, "Example");
+        assert_eq!(entry.usr, "alice@example.com");
+        assert_eq!(entry.key, "ABC123");
+    }
+
+    #[test]
+    fn extracts_totp_uris_embedded_in_file_text() {
+        let text = r#"
+        exported = [
+          "otpauth://totp/GitHub:alice?secret=AAA111&issuer=GitHub",
+          "otpauth://totp/Bob?secret=BBB222&issuer=Mail"
+        ]
+        "#;
+
+        let entries = parse_totp_text(text);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "GitHub");
+        assert_eq!(entries[0].usr, "alice");
+        assert_eq!(entries[1].name, "Mail");
+        assert_eq!(entries[1].usr, "Bob");
+    }
+
+    #[test]
+    fn does_not_duplicate_line_with_trailing_punctuation() {
+        let text = "otpauth://totp/GitHub:alice?secret=AAA111&issuer=GitHub,";
+
+        let entries = parse_totp_text(text);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "GitHub");
+        assert_eq!(entries[0].usr, "alice");
+    }
 }
