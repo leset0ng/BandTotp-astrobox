@@ -8,6 +8,6 @@
     "entry": "astrobox_ng_plugin_template_rust.wasm",
     "wasi_version": 2,
     "api_level": 3,
-    "permissions": ["network", "device", "interconnect", "dialog"],
+    "permissions": ["network", "device", "interconnect", "dialog", "thirdpartyapp"],
     "additional_files": []
 }

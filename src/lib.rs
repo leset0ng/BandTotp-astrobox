@@ -38,10 +38,18 @@ impl event_v3::Guest for BandTotpPlugin {
     ) -> FutureReader<String> {
         let (writer, reader) = astrobox_ng_wit::wit_future::new::<String>(|| String::new());
 
-        astrobox_ng_wit::spawn(async move {
-            tracing::info!("event_id={}, event={:?}, event_payload={}", event_id, event, event_payload);
+        tracing::info!(
+            "ui event: event_id={}, event={:?}, payload_len={}",
+            event_id,
+            event,
+            event_payload.len()
+        );
+        astrobox_ng_wit::block_on(async {
             ui::handle_ui_event(event, &event_id, &event_payload).await;
-            let _ = writer.write("".to_string()).await;
+        });
+
+        astrobox_ng_wit::spawn(async move {
+            let _ = writer.write(String::new()).await;
         });
 
         reader

@@ -51,25 +51,37 @@ pub async fn handle_ui_event(evtype: ui_v3::Event, event_id: &str, payload: &str
             EVENT_LAUNCH_APP => handle_launch_app().await,
             _ => {}
         },
-        ui_v3::Event::Input => {
-            let value = parse_input_value(payload);
-            if event_id == ID_URI_INPUT {
-                update_uri_text(&value);
-            } else if event_id == ID_PKG_INPUT {
-                update_package_name(&value);
+        ui_v3::Event::Input | ui_v3::Event::Change | ui_v3::Event::Blur => {
+            if let Some(value) = parse_input_value(payload, event_id) {
+                if event_id == ID_URI_INPUT {
+                    update_uri_text(&value);
+                } else if event_id == ID_PKG_INPUT {
+                    update_package_name(&value);
+                }
             }
         }
         _ => {
-            tracing::warn!("unhandled event: evtype={:?}, event_id={}", evtype, event_id);
+            tracing::warn!(
+                "unhandled event: evtype={:?}, event_id={}",
+                evtype,
+                event_id
+            );
         }
     }
 }
 
-fn parse_input_value(payload: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(payload)
-        .ok()
-        .and_then(|v| v.get("value").and_then(|v| v.as_str()).map(String::from))
-        .unwrap_or_else(|| payload.to_string())
+fn parse_input_value(payload: &str, event_id: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+    value
+        .get("value")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            value
+                .get("inputs")
+                .and_then(|inputs| inputs.get(event_id))
+                .and_then(|v| v.as_str())
+        })
+        .map(str::to_string)
 }
 
 fn update_uri_text(text: &str) {
@@ -94,6 +106,8 @@ async fn handle_sync() {
         (state.uri_text.clone(), state.package_name.clone())
     };
 
+    update_status("正在同步到手环...");
+
     let entries = crate::sync::parse_totp_text(&text);
     if entries.is_empty() {
         update_status("没有解析到有效的 otpauth://totp URI");
@@ -111,6 +125,8 @@ async fn handle_sync() {
 
 async fn handle_pick_file() {
     tracing::info!("handle_pick_file");
+    update_status("正在选择文件...");
+
     match crate::sync::pick_totp_file().await {
         Ok(text) => {
             let count = crate::sync::parse_totp_text(&text).len();
@@ -134,6 +150,8 @@ async fn handle_launch_app() {
         state.package_name.clone()
     };
 
+    update_status("正在打开手环应用...");
+
     match crate::sync::launch_band_totp(&pkg).await {
         Ok(msg) => update_status(&msg),
         Err(e) => update_status(&format!("打开失败：{}", e)),
@@ -149,7 +167,9 @@ fn build_ui(state: &UiState) -> ui_v3::Element {
         .prop("id", ID_PKG_INPUT)
         .width_full()
         .margin_bottom(8)
-        .on(ui_v3::Event::Input, ID_PKG_INPUT);
+        .on(ui_v3::Event::Input, ID_PKG_INPUT)
+        .on(ui_v3::Event::Change, ID_PKG_INPUT)
+        .on(ui_v3::Event::Blur, ID_PKG_INPUT);
 
     let uri_input = ui_v3::Element::new(ui_v3::ElementType::Textarea, Some(&state.uri_text))
         .prop("id", ID_URI_INPUT)
@@ -157,7 +177,9 @@ fn build_ui(state: &UiState) -> ui_v3::Element {
         .width_full()
         .height(160)
         .margin_bottom(8)
-        .on(ui_v3::Event::Input, ID_URI_INPUT);
+        .on(ui_v3::Event::Input, ID_URI_INPUT)
+        .on(ui_v3::Event::Change, ID_URI_INPUT)
+        .on(ui_v3::Event::Blur, ID_URI_INPUT);
 
     let btn_row = ui_v3::Element::new(ui_v3::ElementType::Div, None)
         .flex()
